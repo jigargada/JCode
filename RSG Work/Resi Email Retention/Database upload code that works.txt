@@ -1,0 +1,289 @@
+
+library(data.table)
+library(RODBC)
+library(zoo)
+library(stringr)
+library(rsgutilr)
+library(lubridate)
+
+load("//prodpricapp02/d/Analytics/Resi Email Retention/rate_upload.robj")
+mkt <- data.table(read.csv("//prodpricapp02/d/Analytics/Resi Email Retention/Email Retention Cust_Data (for Marketing dept)_V4.csv", header = TRUE))
+rate_upload <- rate_upload[, `:=`(acct_nbr = paste0(substr(acct_nbr, 1,3), "-", substr(acct_nbr,4,10)))]
+
+mkt_acct <- copy(mkt)[, list(Account.Number)]
+setkey(mkt_acct, Account.Number)
+setkey(contract_grp, acct_nbr)
+contract_grp <- contract_grp[mkt_acct]
+
+Next_review_dt <- data.table(sqlProc(server="prodbirpt", db="DWPSA",
+                                     sqlFile="SELECT ifcomp, ifacct, CONVERT(DATETIME, CONVERT(CHAR(8), ifdat1)) 
+                                     AS next_review_dt FROM (SELECT ifcomp, ifacct,
+                                     case when ifdat1 > 30000000 or ifdat1 < 20000000 
+                                     or right(ifdat1,2) * 1 < 1 or right(ifdat1,2) * 1 > 31
+                                     or left(right(ifdat1,4),2) * 1 < 1
+                                     or left(right(ifdat1,4),2) * 1 > 12
+                                     then NULL else ifdat1 end as ifdat1, 
+                                     Row_number() 
+                                     OVER ( 
+                                     partition BY ac.ifcomp, ac.ifacct 
+                                     ORDER BY ac.dm_timestamp DESC) AS rn 
+                                     FROM stg_ifp_bipif AS ac 
+                                     WHERE ac.IFCOMP in ('858','894','899','923', '282', '320', '865')
+                                     AND ETL_BATCH_ID is not null ) AS z 
+                                     WHERE  rn = 1 and CONVERT(DATETIME, CONVERT(CHAR(8), ifdat1)) IS NOT NULL",
+                                     asText=TRUE,windows_auth = TRUE, as.is = TRUE))
+
+
+Next_review_dt[,`:=`(ifacct=sprintf("%07.f", as.numeric(ifacct)),
+                     ifcomp=sprintf("%03.f", as.numeric(ifcomp)))]
+
+
+next_review_dt_sub <- unique(Next_review_dt[,list(infopro_div_nbr=as.integer(ifcomp),
+                                                  account_number=paste0(ifcomp,"-", ifacct ),
+                                                  NRD=as.numeric(paste0(substr(next_review_dt,1,4),
+                                                                        substr(next_review_dt,6,7),
+                                                                        substr(next_review_dt,9,10))))])
+
+setkey(mkt_acct, Account.Number)
+setkey(next_review_dt_sub, account_number)
+next_review_dt_sub <- next_review_dt_sub[mkt_acct]
+
+setkey(mkt, InfoPro.Division.Number, Account.Number)
+setkey(next_review_dt_sub, infopro_div_nbr, account_number)
+mkt <- mkt[next_review_dt_sub]
+
+resi_cust_info_sub_email[, `:=`(account_number = paste0(substr(account_number, 1,3), "-", substr(account_number,4,10)))]
+resi_cust_tenure <- copy(resi_cust_info_sub_email)[, list(account_number, account_open_date)]
+
+setkey(resi_cust_tenure, account_number)
+setkey(mkt_acct, Account.Number)
+resi_cust_tenure <- resi_cust_tenure[mkt_acct]
+
+setkey(mkt, Account.Number)
+setkey(resi_cust_tenure, account_number)
+mkt <- mkt[resi_cust_tenure]
+
+mkt[,`:=` (tenure_months = (as.yearmon(as.Date("2016-07-21"))-
+                              as.yearmon(as.Date(account_open_date)))*12)]
+
+sumByCols <- c("acct_nbr")
+contract_grp_1 <- contract_grp[, lapply(.SD,sum),by=sumByCols,.SDcols=c("container_cnt")]
+
+setkey(mkt_acct, Account.Number)
+setkey(contract_grp_1, acct_nbr)
+contract_grp_1 <- contract_grp_1[mkt_acct]
+
+setkey(mkt, Account.Number)
+setkey(contract_grp_1, acct_nbr)
+mkt <- mkt[contract_grp_1]
+
+contract_grp[, `:=`(Total_yard_month = ((1/as.numeric(pickup_period_length))*(52/12)*
+                                          as.numeric(pickup_period_total_lifts)*as.numeric(container_size)),
+                    Future_rate_per_Bill = ifelse(effective_date > 20160713, revenue_per_bill, 0 ))]
+
+
+contract_grp_u <- copy(contract_grp)[, list(infopro_div_nbr, acct_nbr, site_nbr, container_grp_nbr, 
+                                            container_size, revenue_annual, revenue_per_bill, Total_yard_month)]
+contract_grp_u[, `:=`(container_size = as.numeric(container_size),
+                      revenue_annual = as.numeric(revenue_annual),
+                      revenue_per_bill = as.numeric(revenue_per_bill))]
+
+sumByCols <- c("infopro_div_nbr", "acct_nbr", "site_nbr", "container_grp_nbr")
+contract_grp_u <- contract_grp_u[, lapply(.SD,sum),by=sumByCols,
+                               .SDcols=c("container_size", "revenue_annual", "revenue_per_bill", "Total_yard_month")]
+
+
+setkey(contract_grp_u, infopro_div_nbr, acct_nbr, site_nbr, container_grp_nbr)
+setkey(rate_upload, infopro_div_nbr, acct_nbr, site_nbr, cont_grp)
+
+# rate_upload_1 <- rate_upload[contract_grp_u]
+contract_grp_u_1 <- contract_grp_u[rate_upload]
+contract_grp_u_1 <- contract_grp_u_1[!is.na(revenue_annual)]
+ contract_grp_u_1 <- contract_grp_u_1[, `:=`(container_grp_nbr =NULL , i.revenue_annual =NULL, i.revenue_per_bill=NULL, site_nbr =NULL, 
+                                             container_cd = NULL, close_date =NULL, infopro_div_nbr=NULL)]
+contract_grp_u_1 <- unique(contract_grp_u_1)
+
+
+sumByCols <- c( "acct_nbr", "RCF")
+contract_grp_u_1 <- contract_grp_u_1[, lapply(.SD,sum),by=sumByCols,
+                                 .SDcols=c("lifts_per_week", "quantity", "revenue_per_bill", "revenue_annual", "container_size", "Total_yard_month")]
+
+
+setkey(mkt, Account.Number)
+setkey(contract_grp_u_1, acct_nbr)
+mkt_1 <- mkt[contract_grp_u_1]
+
+
+takers_mn <- data.table(read.csv("//prodpricapp02/d/Analytics/Resi Email Retention/Executed Contracts - Touch 1 - July 2016_MN.csv", header=TRUE))
+takers_nj <- data.table(read.csv("//prodpricapp02/d/Analytics/Resi Email Retention/Executed Contracts - Touch 1 - July 2016_NJ.csv", header=TRUE))
+takers_littlerock <- data.table(read.csv("//prodpricapp02/d/Analytics/Resi Email Retention/Executed Contracts - Touch 1 - July 2016_Little_Rock.csv", header=TRUE))
+declined <- data.table(read.csv("//prodpricapp02/d/Analytics/Resi Email Retention/Executed Contracts - Touch 1 - July 2016_Declined.csv", header=TRUE))
+takers_1<- rbind(takers_mn, takers_nj, takers_littlerock, declined)
+takers_1[,`:=`(Wave_1= 1,
+               Email.Address = NULL)]
+
+takers_mn2 <- data.table(read.csv("//prodpricapp02/d/Analytics/Resi Email Retention/Executed Contracts - Touch 2 - July 2016_MN.csv", header=TRUE))
+takers_nj2 <- data.table(read.csv("//prodpricapp02/d/Analytics/Resi Email Retention/Executed Contracts - Touch 2 - July 2016_NJ.csv", header=TRUE))
+takers_littlerock2 <- data.table(read.csv("//prodpricapp02/d/Analytics/Resi Email Retention/Executed Contracts - Touch 2 - July 2016_Little_Rock.csv", header=TRUE))
+declined2 <- data.table(read.csv("//prodpricapp02/d/Analytics/Resi Email Retention/Executed Contracts - Touch 2 - July 2016_Declined.csv", header=TRUE))
+takers_2<- rbind(takers_mn2, takers_nj2, takers_littlerock2, declined2)
+takers_2[,`:=`(Wave_2= 1, Email.Address = NULL)]
+
+
+# setkey(mkt_1, Account.Number)
+# setkey(takers_1, Account.Number)
+# mkt_2 <- merge(mkt_1, takers_1, by.x = "Account.Number", by.y = "Account.Number", all.x = TRUE)
+
+setkey(mkt_1,Account.Number)
+setkey(takers_1,Account.Number)
+
+mkt_2 <- takers_1[mkt_1]
+
+setkey(mkt_2,Account.Number)
+setkey(takers_2,Account.Number)
+
+mkt_3 <- takers_2[mkt_2]
+mkt_3 <- mkt_3[, `:=`(Date.Signed = as.character(Date.Signed),
+                      i.Date.Signed = as.character(i.Date.Signed))]
+mkt_3[, `:=`(Date.Signed = coalesce(Date.Signed,i.Date.Signed))]
+mkt_3[, `:=`(i.Date.Signed = NULL)]
+mkt_3[, `:=`(Wave_3='')]
+contract_upload_1 <- data.table(read.csv("//prodpricapp02/d/Analytics/Resi Email Retention/Contract_Upload.csv", header=TRUE))
+contract_upload_2 <- data.table(read.csv("//prodpricapp02/d/Analytics/Resi Email Retention/Contract_Upload_2.csv", header=TRUE))
+contract_upload <- rbind(contract_upload_1, contract_upload_2)
+contract_upload[,`:=`(site_nbr = NULL, Term = NULL, Date.Signed = NULL, Expiration_Date = NULL)]
+contract_upload[,`:=`(acct_nbr=paste0(sprintf("%03.f", as.numeric(infopro_div_nbr)), "-",
+                                   sprintf("%07.f", as.numeric(acct_nbr)) ))]
+contract_upload[,`:=`(infopro_div_nbr=NULL)]
+
+setkey(mkt_3,acct_nbr)
+setkey(contract_upload, acct_nbr)
+mkt_3 <- contract_upload[mkt_3]
+
+future_rate <- contract_grp <- data.table(sqlProc(server="prodbirpt", db="DWCORE",
+                                                  sqlFile="with accts as(
+                                   SELECT 
+                                                  b.COMPANY_NUMBER AS infopro_div_nbr
+                                                  ,b.ACCOUNT_NUMBER as acct_nbr 
+                                                  ,b.SITE AS site_nbr
+                                                  ,ds.addr_line_1 
+                                                  ,ds.addr_line_2
+                                                  ,ds.city 
+                                                  ,ds.state 
+                                                  ,ds.postal_cd 
+                                                  ,ds.postal_cd_plus4 
+                                                  ,b.CONTAINER_GROUP AS container_grp_nbr
+                                                  ,case when b.charge_method = 'Q' then b.CHARGE_RATE*dcg.Container_Cnt*dcg.Recurring_Charge_Freq 
+                                                  else b.CHARGE_RATE*dcg.Recurring_Charge_Freq end as revenue_ann
+                                                  ,case when b.charge_method = 'Q' then b.CHARGE_RATE*dcg.Container_Cnt 
+                                                  else b.CHARGE_RATE end as revenue_per_bill
+                                                  
+                                                  , dcg.Container_size
+                                                  , b.close_date 
+                                                  , b.EFFECTIVE_DATE
+                                                  , b.CHARGE_CODE
+                                                  , b.CHARGE_TYPE
+                                                  , b.CHARGE_METHOD
+                                                  ,count(*) over (partition by b.company_number, b.account_number, b.site, b.container_group, b.charge_rate) as dup_cc
+                                                  ,dcg.Revenue_Distribution_Cd
+                                                  ,dcg.Contract_Grp_Nbr
+                                                  ,dcg.Acct_Type
+                                                  ,dcg.Orig_Start_Dt
+                                                  ,dcg.Rate_Restrict_Dt
+                                                  ,dcg.Rate_Type,Stop_Cd
+                                                  ,dcg.District_Cd
+                                                  ,dcg.Recurring_Charge_Freq
+                                                  ,dcg.Seasonal_Stop_Dt
+                                                  ,dcg.Seasonal_Restart_Dt
+                                                  ,dcg.Close_Dt
+                                                  ,dcg.Disposal_Rate_Restrict_Dt
+                                                  ,dcg.is_Active
+                                                  ,dcg.Contract_Nbr
+                                                  ,dcg.Pickup_Period_Total_Lifts
+                                                  ,dcg.Pickup_Period_Length
+                                                  ,dcg.Pickup_Period_Unit,dcg.Container_Cnt,dcg.Container_Cd
+                                                  FROM dwpsa.dbo.STG_IFP_BIPCCR b
+                                                  join dwcore.dbo.Dim_Container_Grp dcg
+                                                  on b.COMPANY_NUMBER = dcg.Infopro_Div_Nbr 
+                                                  and b.ACCOUNT_NUMBER = dcg.Acct_Nbr
+                                                  and b.SITE = dcg.Site_Nbr
+                                                  and b.CONTAINER_GROUP = dcg.Container_Grp_Nbr
+                                                  and dcg.is_current =1
+                                                  join dwcore.dbo.dim_site ds
+                                                  on b.company_number = ds.infopro_div_nbr
+                                                  and b.account_number= ds.acct_nbr 
+                                                  and b.site= ds.site_nbr
+                                                  and ds.is_current=1
+                                                  WHERE b.CHARGE_TYPE = 'R' AND
+                                                  b.COMPANY_NUMBER in ('858','894','899','923','282', '320', '865')
+                                                  and  (b.CLOSE_DATE<20170101 ) 
+                                                  and 	b.EFFECTIVE_DATE>=20160801
+                                                  and b.current_ind='Y'
+                                                  and dcg.Acct_Type NOT in ('X','T') 
+                                                  AND dcg.Contract_Grp_Nbr = '0'  )
+                                                  select
+                                                  infopro_div_nbr, acct_nbr, site_nbr, container_grp_nbr,
+                                                  EFFECTIVE_DATE, CLOSE_DATE
+                                                  ,sum(revenue_per_bill) as future_revenue_per_bill
+                                                  
+                                                  from accts 
+                                                  
+                                                  group by 
+                                                  infopro_div_nbr, acct_nbr, site_nbr, container_grp_nbr,
+                                                  EFFECTIVE_DATE, CLOSE_DATE",
+                                                  asText=TRUE,windows_auth = TRUE, as.is = TRUE))
+
+future_rate <- future_rate[,`:=`(account_number=paste0(sprintf("%03.f", as.numeric(infopro_div_nbr)), "-",
+                                      sprintf("%07.f", as.numeric(acct_nbr)) ))]
+
+setkey(future_rate, account_number)
+setkey(mkt_acct, Account.Number)
+future_rate <- future_rate[mkt_acct]
+future_rate <- future_rate[!is.na(acct_nbr)]
+future_rate <- future_rate[close_date != 0]
+
+future_rate <- future_rate[,`:=`(infopro_div_nbr = NULL, acct_nbr= NULL, site_nbr= NULL, container_grp_nbr = NULL, 
+                      effective_date = NULL, close_date = NULL, 
+                      future_revenue_per_bill = as.numeric(future_revenue_per_bill))]
+
+
+future_rate <- future_rate[, lapply(.SD,sum),by="account_number",
+                                     .SDcols=c("future_revenue_per_bill")]
+
+setkey(future_rate, account_number)
+setkey(mkt_acct, Account.Number)
+future_rate_1 <- future_rate[mkt_acct]
+
+setkey(future_rate_1, account_number)
+setkey(mkt_3, acct_nbr)
+mkt_4 <- mkt_3[future_rate_1]
+
+mkt_4 <- mkt_4[,`:=`(Profitability='', Cat_Rank='')]
+
+mkt_4 <- mkt_4[,`:=`(Account_Number = as.numeric(substr(acct_nbr, 5,11)))]
+
+mkt_5 <- copy(mkt_4)[, list(InfoPro.Division.Number, acct_nbr, Account_Number, Customer.Service.Number, Email, Service.Zip, 
+                    revenue_per_bill, revenue_annual, future_revenue_per_bill, Year_1, Year_2, Year_3, 
+                    tenure_months, RCF, Profitability, Cat_Rank, INV, EVR, FRF, Date.Signed, 
+                    container_cnt, Total_yard_month, RCY, SW, account_open_date, NRD, contract_number,
+                    Group,  Wave_1, Wave_2, Wave_3)]
+
+NAs <- copy(mkt_5)[is.na(Email)]
+mkt_5 <- mkt_5[!is.na(Email)]
+mkt_5 <- unique(mkt_5)
+
+sqlInsert("prodpricsql01", "Marketing_Campaign", "Mkt_Analysis", mkt_5, windows_auth = TRUE)
+
+save.image("C:/Users/gadaji/Desktop/EMail_Retention_Database.Rdata")
+
+conect <- odbcConnect("prodpricsql01")
+sqlSave(conect, mkt_5, tablename = "Mkt_Analysis_1", rownames = FALSE, colnames = FALSE)
+
+
+mkt <- mkt[,`:=`(Account_Number = as.numeric(substr(Account.Number, 5,11)))]
+
+sqlSave(conect, mkt, tablename = "Mkt_Send_Wave1_MnNJAr", rownames = FALSE, colnames = FALSE)
+
+
+nrow(mkt_5)
+rm(mkt_5)
