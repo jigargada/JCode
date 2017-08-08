@@ -6,10 +6,13 @@ Created on Sun Aug  6 17:13:38 2017
 """
 
 import csv
+import pandas as pd
 
-f = open('C:/Users/jigar/Desktop/KAGGLE/Titanic dataset/train.csv')
-csv_f = csv.reader(f)
+#f = open('D:/Github/JCode/JCode/KAGGLE/Titanic dataset/train.csv')
+csv_f = pd.read_csv('D:/Github/JCode/JCode/KAGGLE/Titanic dataset/train.csv')
 
 for row in csv_f:
     print (row)
     
+print (csv_f.describe())
+
