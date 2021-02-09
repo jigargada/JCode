@@ -12,9 +12,14 @@ import tkinter as tk
 #    print("Tkinter is easy to use!")
 
 
-def weightconversion():  
+def kgtolbs():  
     x1 = entry1.get()
     label1 = tk.Label(root, text = str(round(float(x1)* 2.20462, 2)) + " lbs")
+    canvas1.create_window(200, 230, window = label1)
+    
+def lbstokg():  
+    x1 = entry1.get()
+    label1 = tk.Label(root, text = str(round(float(x1)* 0.453592, 2)) + " kg")
     canvas1.create_window(200, 230, window = label1)
     
 root = tk.Tk()
@@ -30,8 +35,15 @@ canvas1.create_window(200, 140, window = entry1)
 #                  fg="red",
 #                  command=quit)
 #button.pack(side=tk.LEFT)
-button1 = tk.Button(text="Enter Weight in KG",
-                   command=weightconversion)
+button1 = tk.Button(text="Convert KG to Pounds",
+                   command=kgtolbs)
 canvas1.create_window(200, 180, window=button1)
+button1.pack(side=tk.LEFT)
+
+
+button2 = tk.Button(text="Convert Pounds to KG" ,
+                   command=lbstokg)
+canvas1.create_window(200, 180, window = button2)
+button2.pack(side=tk.RIGHT)
 
 root.mainloop()
